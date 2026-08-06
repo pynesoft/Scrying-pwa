@@ -4,6 +4,8 @@ A wave equation solved on a grid and rendered as a phosphor halftone lattice.
 Tap to drop an impulse; ripples reflect off the edges and interfere. Optional
 sonification reads a closed ring through the field and plays it as a waveform.
 
+https://pynesoft.github.io/Scrying-pwa/
+
 ## Deploying to GitHub Pages
 
 1. Put these files at the **root** of a repo (or in a `docs/` folder).
