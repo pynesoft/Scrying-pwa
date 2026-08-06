@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Scrying Field</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<style>
+  :root{ --g0:#000; --g1:#0e2413; --g2:#2f6b3c; --g3:#458f52; --g5:#9fe8ae; --g6:#d8ffe0; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--g0)}
+  body{
+    font:400 11px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    letter-spacing:.14em; color:var(--g2);
+    -webkit-tap-highlight-color:transparent;
+  }
+  #field{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+  #hint{
+    position:fixed;left:0;right:0;top:50%;transform:translateY(-50%);
+    text-align:center;text-transform:uppercase;color:var(--g2);
+    pointer-events:none;transition:opacity .9s ease;
+  }
+  #hint.gone{opacity:0}
+  #bar{
+    position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;
+    gap:18px;align-items:center;padding:18px 16px calc(18px + env(safe-area-inset-bottom));
+  }
+  button{
+    font:inherit;letter-spacing:.16em;text-transform:uppercase;color:var(--g2);
+    background:transparent;border:1px solid var(--g1);border-radius:0;
+    padding:8px 16px;cursor:pointer;transition:color .2s,border-color .2s;
+  }
+  button:hover{color:var(--g5);border-color:var(--g3)}
+  button:focus-visible{outline:1px solid var(--g6);outline-offset:2px;color:var(--g6)}
+  button[aria-pressed="true"]{color:var(--g5);border-color:var(--g3)}
+  #state{color:var(--g1);text-transform:uppercase}
+  @media (prefers-reduced-motion:reduce){#hint{transition:none}}
+</style>
+</head>
+<body>
+<canvas id="field"></canvas>
+<p id="hint">touch anywhere</p>
+<div id="bar">
+  <button id="clear" type="button">Clear</button>
+  <button id="sound" type="button" aria-pressed="false">Sound off</button>
+  <button id="full" type="button">Full</button>
+  <span id="state">still</span>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+// ---- the two that matter ----------------------------------------------
+const S   = 14;  // dot spacing in css px — sets the depth plane
+const SUB = 2;   // sim cells per dot, per axis
+
+// ---- field ------------------------------------------------------------
+const DOT_FILL   = 0.92;
+const LEVELS     = 7;
+const C2         = 0.10;
+const DAMP_BASE  = 0.99995;
+const STEPS_BASE = 1;
+const IMPULSE_BASE = 3;
+const DRAG_AMP   = 0.5;
+const GAIN_MAX   = 40;
+const GAIN_EASE  = 0.03;
+const REST_EPS   = 0.0015;
+const STILL_EPS  = 0.0002;
+
+const SUBSTEPS  = STEPS_BASE * SUB;
+const DAMP      = Math.pow(DAMP_BASE, 1 / SUB);
+const IMPULSE_R = IMPULSE_BASE * SUB;
+const INV_BLOCK = 1 / (SUB * SUB);
+
+// ---- sound ------------------------------------------------------------
+const RING_N    = 256;   // samples around the ring = one cycle of the waveform
+const RING_R    = 30;    // ring radius in sim cells
+const BASE_FREQ = 180;   // Hz
+const CUTOFF    = 3200;  // lowpass, tames the harshness
+const MASTER    = 0.16;  // overall level — start low, this can get shrill
+
+// ---- palette ----------------------------------------------------------
+const LOW  = [0, 38, 12];
+const HIGH = [150, 255, 160];
+const GLOW = true;
+const GLOW_COLOR = 'rgb(80,255,110)';
+const GLOW_BLUR = 8;
+
+// ---- state ------------------------------------------------------------
+const canvas = document.getElementById('field');
+const ctx = canvas.getContext('2d', { alpha: false });
+const hint = document.getElementById('hint');
+const stateEl = document.getElementById('state');
+const soundBtn = document.getElementById('sound');
+
+let DW = 0, DH = 0, DN = 0;
+let GW = 0, GH = 0, GN = 0;
+let ox = 0, oy = 0, cssW = 0, cssH = 0;
+let prev, cur, next, avg, lev;
+let gain = 1;
+let raf = 0;
+let running = false;
+let ringX = 0, ringY = 0;   // ring center, in sim cells
+
+const PHOSPHOR = [];
+for (let L = 0; L < LEVELS; L++) {
+  const t = L / (LEVELS - 1), w = t * t * t;
+  PHOSPHOR.push(`rgb(${(LOW[0] + (HIGH[0] - LOW[0]) * w) | 0},${(LOW[1] + (HIGH[1] - LOW[1]) * t) | 0},${(LOW[2] + (HIGH[2] - LOW[2]) * w) | 0})`);
+}
+const SIZE = [];
+for (let L = 0; L < LEVELS; L++) SIZE.push(Math.max(1, (L / (LEVELS - 1)) * S * DOT_FILL));
+
+function setState(s) { stateEl.textContent = s; }
+
+// ---- grid -------------------------------------------------------------
+function build() {
+  cssW = Math.max(1, window.innerWidth);
+  cssH = Math.max(1, window.innerHeight);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  DW = Math.max(4, Math.floor(cssW / S));
+  DH = Math.max(4, Math.floor(cssH / S));
+  DN = DW * DH;
+  GW = DW * SUB; GH = DH * SUB; GN = GW * GH;
+  ox = (cssW - DW * S) / 2;
+  oy = (cssH - DH * S) / 2;
+
+  prev = new Float32Array(GN);
+  cur  = new Float32Array(GN);
+  next = new Float32Array(GN);
+  avg  = new Float32Array(DN);
+  lev  = new Uint8Array(DN);
+
+  ringX = GW / 2; ringY = GH / 2;
+  gain = 1;
+  running = false;
+  setState('still');
+  silence();
+  render();
+}
+
+// ---- wave -------------------------------------------------------------
+function step() {
+  for (let y = 1; y < GH - 1; y++) {
+    let i = y * GW + 1;
+    for (let x = 1; x < GW - 1; x++, i++) {
+      const lap = 0.5  * (cur[i - 1] + cur[i + 1] + cur[i - GW] + cur[i + GW])
+                + 0.25 * (cur[i - GW - 1] + cur[i - GW + 1] + cur[i + GW - 1] + cur[i + GW + 1])
+                - 3 * cur[i];
+      next[i] = (2 * cur[i] - prev[i] + C2 * lap) * DAMP;
+    }
+  }
+  const t = prev; prev = cur; cur = next; next = t;
+}
+
+function impulse(gx, gy, amp) {
+  const r = IMPULSE_R, r2 = r * r;
+  for (let y = Math.max(1, gy - r); y < Math.min(GH - 1, gy + r + 1); y++) {
+    for (let x = Math.max(1, gx - r); x < Math.min(GW - 1, gx + r + 1); x++) {
+      const dx = x - gx, dy = y - gy, d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      const v = amp * Math.cos((Math.sqrt(d2) / r) * Math.PI * 0.5);
+      const i = y * GW + x;
+      cur[i] += v;
+      prev[i] += v;
+    }
+  }
+  ringX = gx; ringY = gy;   // listen where you last touched
+  running = true;
+  setState('rippling');
+  kick();
+}
+
+// ---- render -----------------------------------------------------------
+function render() {
+  let rawMax = 0, avgMax = 0;
+  for (let dy = 0; dy < DH; dy++) {
+    const by = dy * SUB;
+    for (let dx = 0; dx < DW; dx++) {
+      const bx = dx * SUB;
+      let s = 0;
+      for (let y = 0; y < SUB; y++) {
+        let i = (by + y) * GW + bx;
+        for (let x = 0; x < SUB; x++, i++) {
+          const v = cur[i]; s += v;
+          const a = v < 0 ? -v : v;
+          if (a > rawMax) rawMax = a;
+        }
+      }
+      const m = s * INV_BLOCK;
+      avg[dy * DW + dx] = m;
+      const am = m < 0 ? -m : m;
+      if (am > avgMax) avgMax = am;
+    }
+  }
+
+  const target = Math.min(GAIN_MAX, 1 / Math.max(avgMax, 1 / GAIN_MAX));
+  gain += (target - gain) * GAIN_EASE;
+  const presence = Math.min(1, avgMax / REST_EPS);
+  const k = (LEVELS - 1) * presence * 0.5;
+
+  for (let i = 0; i < DN; i++) {
+    let v = avg[i] * gain;
+    if (v < -1) v = -1; else if (v > 1) v = 1;
+    lev[i] = Math.round((v + 1) * k) | 0;
+  }
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  for (let L = 1; L < LEVELS; L++) {
+    ctx.fillStyle = PHOSPHOR[L];
+    if (GLOW && L === LEVELS - 1) { ctx.shadowColor = GLOW_COLOR; ctx.shadowBlur = GLOW_BLUR; }
+    else ctx.shadowBlur = 0;
+    const d = SIZE[L], off = (S - d) / 2;
+    for (let y = 0, i = 0; y < DH; y++) {
+      const py = oy + y * S + off;
+      for (let x = 0; x < DW; x++, i++) {
+        if (lev[i] !== L) continue;
+        ctx.fillRect(ox + x * S + off, py, d, d);
+      }
+    }
+  }
+
+  return rawMax;
+}
+
+// ---- sonification -----------------------------------------------------
+// the field IS a wave, so no synthesis is needed — we read a closed loop
+// through it and use that as one cycle of an oscillator's waveform. a ring
+// has no endpoints, so it is periodic by construction, with no seam.
+//
+// no AudioWorklet here on purpose: loading a worklet module from a file://
+// page needs a blob URL, and Firefox refuses that from a null origin. this
+// version uses PeriodicWave instead, which is plain main-thread Web Audio
+// and works from the filesystem.
+
+const HARMONICS = 32;   // how much of the ring's shape survives into the tone
+const WAVE_EVERY = 3;   // rebuild the waveform every Nth frame
+
+// precomputed DFT basis, so the per-frame transform is just multiply-add
+const COS = new Float32Array((HARMONICS + 1) * RING_N);
+const SIN = new Float32Array((HARMONICS + 1) * RING_N);
+for (let h = 1; h <= HARMONICS; h++) {
+  for (let k = 0; k < RING_N; k++) {
+    const a = -2 * Math.PI * h * k / RING_N;
+    COS[h * RING_N + k] = Math.cos(a);
+    SIN[h * RING_N + k] = Math.sin(a);
+  }
+}
+const wreal = new Float32Array(HARMONICS + 1);
+const wimag = new Float32Array(HARMONICS + 1);
+
+let ac = null, osc = null, amp = null, audioOn = false, audioReady = false;
+let waveTick = 0;
+
+async function initAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  osc = ac.createOscillator();
+  osc.frequency.value = BASE_FREQ;
+
+  const filt = ac.createBiquadFilter();
+  filt.type = 'lowpass';
+  filt.frequency.value = CUTOFF;
+  filt.Q.value = 0.7;
+
+  amp = ac.createGain();
+  amp.gain.value = 0;
+
+  osc.connect(filt).connect(amp).connect(ac.destination);
+  osc.start();
+  audioReady = true;
+}
+
+function silence() {
+  if (amp && ac) amp.gain.setTargetAtTime(0, ac.currentTime, 0.05);
+}
+
+function sampleField(x, y) {
+  if (x < 0) x = 0; else if (x > GW - 1.001) x = GW - 1.001;
+  if (y < 0) y = 0; else if (y > GH - 1.001) y = GH - 1.001;
+  const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0;
+  const i = y0 * GW + x0;
+  const a = cur[i] + (cur[i + 1] - cur[i]) * fx;
+  const b = cur[i + GW] + (cur[i + GW + 1] - cur[i + GW]) * fx;
+  return a + (b - a) * fy;
+}
+
+function sendAudio(rawMax) {
+  if (!audioOn || !audioReady) return;
+  const t = new Float32Array(RING_N);
+  let mean = 0, mx = 0;
+  for (let k = 0; k < RING_N; k++) {
+    const a = (k / RING_N) * Math.PI * 2;
+    const v = sampleField(ringX + Math.cos(a) * RING_R, ringY + Math.sin(a) * RING_R);
+    t[k] = v; mean += v;
+  }
+  mean /= RING_N;
+  for (let k = 0; k < RING_N; k++) {          // strip DC, else it thumps
+    t[k] -= mean;
+    const a = t[k] < 0 ? -t[k] : t[k];
+    if (a > mx) mx = a;
+  }
+  if (mx > 1e-9) { const inv = 1 / mx; for (let k = 0; k < RING_N; k++) t[k] *= inv; }
+
+  const g = Math.min(1, Math.pow(rawMax / 0.05, 0.35));
+  amp.gain.setTargetAtTime(g * MASTER, ac.currentTime, 0.05);
+
+  if (++waveTick < WAVE_EVERY) return;
+  waveTick = 0;
+
+  for (let h = 1; h <= HARMONICS; h++) {
+    let re = 0, im = 0;
+    const base = h * RING_N;
+    for (let k = 0; k < RING_N; k++) {
+      const v = t[k];
+      re += v * COS[base + k];
+      im += v * SIN[base + k];
+    }
+    wreal[h] = re * 2 / RING_N;
+    wimag[h] = im * 2 / RING_N;
+  }
+  osc.setPeriodicWave(ac.createPeriodicWave(wreal, wimag));
+}
+
+// ---- loop -------------------------------------------------------------
+function frame() {
+  for (let s = 0; s < SUBSTEPS; s++) step();
+  const m = render();
+  sendAudio(m);
+  if (m < STILL_EPS) {
+    running = false; raf = 0;
+    setState('still');
+    silence();
+    return;
+  }
+  raf = requestAnimationFrame(frame);
+}
+function kick() { if (!raf && running) raf = requestAnimationFrame(frame); }
+
+// ---- input ------------------------------------------------------------
+let down = false, lastDrag = 0;
+
+function toGrid(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: Math.min(GW - 2, Math.max(1, Math.floor((e.clientX - r.left - ox) / S * SUB))),
+    y: Math.min(GH - 2, Math.max(1, Math.floor((e.clientY - r.top - oy) / S * SUB)))
+  };
+}
+
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  down = true;
+  hint.classList.add('gone');
+  const g = toGrid(e);
+  impulse(g.x, g.y, 1);
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!down) return;
+  const now = performance.now();
+  if (now - lastDrag < 45) return;
+  lastDrag = now;
+  const g = toGrid(e);
+  impulse(g.x, g.y, DRAG_AMP);
+});
+
+const release = () => { down = false; };
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+
+soundBtn.addEventListener('click', async () => {
+  if (!audioOn) {
+    try {
+      if (!ac) await initAudio();
+      await ac.resume();
+      audioOn = true;
+      soundBtn.textContent = 'Sound on';
+      soundBtn.setAttribute('aria-pressed', 'true');
+    } catch (err) {
+      soundBtn.textContent = 'Sound n/a';
+      console.error(err);
+    }
+  } else {
+    audioOn = false;
+    silence();
+    soundBtn.textContent = 'Sound off';
+    soundBtn.setAttribute('aria-pressed', 'false');
+  }
+});
+
+// ---- fullscreen -------------------------------------------------------
+const fullBtn = document.getElementById('full');
+let wakeLock = null;
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); }
+  catch (err) { console.warn('wake lock unavailable:', err); }
+}
+
+fullBtn.addEventListener('click', async () => {
+  try {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+      keepAwake();
+    } else {
+      await document.exitFullscreen();
+      if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    }
+  } catch (err) {
+    fullBtn.textContent = 'Full n/a';
+    console.error('fullscreen failed:', err);
+  }
+});
+
+document.addEventListener('fullscreenchange', () => {
+  fullBtn.textContent = document.fullscreenElement ? 'Exit' : 'Full';
+});
+
+// android drops the wake lock whenever you tab away
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && document.fullscreenElement && !wakeLock) keepAwake();
+});
+
+function clearField() {
+  if (raf) { cancelAnimationFrame(raf); raf = 0; }
+  build();
+}
+document.getElementById('clear').addEventListener('click', clearField);
+addEventListener('keydown', e => { if (e.key === 'c' || e.key === 'C') clearField(); });
+
+let resizeTimer = 0;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(clearField, 250);
+});
+
+build();
+})();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js', { scope: './' })
+      .catch(err => console.error('service worker registration failed:', err));
+  });
+}
+</script>
+</body>
+</html>
