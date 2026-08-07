@@ -57,42 +57,62 @@
 (() => {
 'use strict';
 
-// ---- the two that matter ----------------------------------------------
-const S   = 6;  // dot spacing in css px — sets the depth plane
-const SUB = 3;   // sim cells per dot, per axis
+// ---- lattice ----------------------------------------------------------
+// S is the single most consequential number here. It sets dot spacing, and
+// because the wallpaper illusion depends on that spacing against how far
+// your eyes can diverge, it also sets how far behind the screen the pattern
+// appears to float. Larger = further back.
+const S   = 6;    // dot spacing in css px
+const SUB = 3;    // sim cells per dot, per axis. 1 is cheapest; 2-3 smooth
+                  // the wavefront edges by averaging each dot's block.
+
+// ---- dot size ---------------------------------------------------------
+// LEVELS quantizes the field; the three below decide how that maps to size.
+// These are deliberately independent of LEVELS — raising LEVELS changes how
+// finely the field is graded, and nothing else.
+const LEVELS     = 12;   // quantization steps, trough -> crest
+const DOT_FILL   = 0.92; // largest dot as a fraction of S
+const MIN_DOT    = 0.30; // smallest visible dot, as a fraction of the largest.
+                         // this is what sets how heavy the resting lattice looks.
+const SIZE_GAMMA = 0.7;  // below 1 fattens the middle of the range, so mid
+                         // values read as dots rather than specks
 
 // ---- field ------------------------------------------------------------
-const DOT_FILL   = 0.92; // largest dot as a fraction of S
-const MIN_DOT    = 0.30;  // smallest dot, as a fraction of the largest
-const SIZE_GAMMA = 0.7;   // below 1 fattens the middle of the range
-const LEVELS     = 24; // dot sizes / brightness steps, trough -> crest
-const C2         = 0.10; // wave speed squared; the 9-point stencil lowers
-const DAMP_BASE  = 0.99995;
-const STEPS_BASE = 1;
-const IMPULSE_BASE = 3;
-const DRAG_AMP   = 0.5; // strength of impulses while dragging
-const GAIN_MAX   = 40; // auto-gain ceiling, keeps a decaying field readable
-const GAIN_EASE  = 0.03; // lower = steadier levels at high gain
-const REST_EPS   = 0.0015; // below this amplitude the lattice fades to black
-const STILL_EPS  = 0.0002; // below this it stops
+const C2         = 0.10;    // wave speed squared. the 9-point stencil lowers
+                            // the stability ceiling — keep under ~0.33
+const DAMP_BASE  = 0.99995; // per frame-equivalent. closer to 1 rings longer
+const STEPS_BASE = 1;       // sim steps per frame, before SUB scaling
+const IMPULSE_BASE = 3;     // tap radius in dots, converted to cells below
+const DRAG_AMP   = 0.5;     // impulse strength while dragging. 0 disables drag
+const GAIN_MAX   = 40;      // auto-gain ceiling, keeps a decaying field readable
+const GAIN_EASE  = 0.03;    // lower = steadier levels at high gain
+const REST_EPS   = 0.0015;  // below this amplitude the lattice fades to black
+const STILL_EPS  = 0.0002;  // below this it stops animating. raise on battery
 
-const SUBSTEPS  = STEPS_BASE * SUB; // simulation steps per frame
-const DAMP      = Math.pow(DAMP_BASE, 1 / SUB); // per-step energy loss
-const IMPULSE_R = IMPULSE_BASE * SUB; // radius of a tap, in lattice cells
+// SUB changes what a "cell" means, so three things are rescaled from it or
+// the feel shifts every time you touch it:
+//   speed  — waves move in cells/step, so smaller cells need more steps
+//   damp   — more steps per frame means more decay per second
+//   radius — a tap measured in cells would shrink on screen
+const SUBSTEPS  = STEPS_BASE * SUB;
+const DAMP      = Math.pow(DAMP_BASE, 1 / SUB);
+const IMPULSE_R = IMPULSE_BASE * SUB;
 const INV_BLOCK = 1 / (SUB * SUB);
 
 // ---- sound ------------------------------------------------------------
 const RING_N    = 256;   // samples around the ring = one cycle of the waveform
-const RING_R    = 30;    // ring radius in sim cells
-const BASE_FREQ = 180;   // Hz
-const CUTOFF    = 3200;  // lowpass, tames the harshness
+const RING_R    = 30;    // ring radius in sim cells. small is rough and noisy,
+                         // large crosses smoother gradients and sings
+const BASE_FREQ = 180;   // Hz. independent of RING_R — the ring is always
+                         // resampled to RING_N points
+const CUTOFF    = 3200;  // lowpass. 3200 is roughly a guitar cabinet
 const MASTER    = 0.16;  // overall level — start low, this can get shrill
-
 // ---- palette ----------------------------------------------------------
-// phosphor ramp: red and blue lag behind green, so only the crests whiten out
+// red and blue lag behind green (the cubic), so only the crests whiten out.
+// ramp all three linearly instead and it reads as flat green, not phosphor.
 const LOW  = [0, 38, 12];
 const HIGH = [150, 255, 160];
-const GLOW = true;  // bloom on the brightest dots only
+const GLOW = true;             // bloom, brightest level only
 const GLOW_COLOR = 'rgb(80,255,110)';
 const GLOW_BLUR = 8;
 
@@ -112,12 +132,14 @@ let raf = 0;
 let running = false;
 let ringX = 0, ringY = 0;   // ring center, in sim cells
 
-// color per level; even the small dots stay visible against black
 const PHOSPHOR = [];
 for (let L = 0; L < LEVELS; L++) {
   const t = L / (LEVELS - 1), w = t * t * t;
   PHOSPHOR.push(`rgb(${(LOW[0] + (HIGH[0] - LOW[0]) * w) | 0},${(LOW[1] + (HIGH[1] - LOW[1]) * t) | 0},${(LOW[2] + (HIGH[2] - LOW[2]) * w) | 0})`);
 }
+// dot size per level. MIN_DOT keeps the quiet lattice visible no matter how
+// many LEVELS there are — the old version divided by (LEVELS - 1), which meant
+// raising LEVELS silently shrank every dot toward nothing.
 const SIZE = [];
 for (let L = 0; L < LEVELS; L++) {
   const t = Math.pow(L / (LEVELS - 1), SIZE_GAMMA);

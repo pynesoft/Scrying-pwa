@@ -1,6 +1,6 @@
 // Bump this string whenever you change index.html or the icons.
 // Nothing else needs editing — the old cache is dropped on activate.
-const CACHE = 'scrying-v1';
+const CACHE = 'scrying-v2';
 
 const SHELL = [
   './',
