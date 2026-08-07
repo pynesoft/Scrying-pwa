@@ -58,13 +58,13 @@
 'use strict';
 
 // ---- the two that matter ----------------------------------------------
-const S   = 30;  // dot spacing in css px — sets the depth plane
-const SUB = 6;   // sim cells per dot, per axis
+const S   = 6;  // dot spacing in css px — sets the depth plane
+const SUB = 3;   // sim cells per dot, per axis
 
 // ---- field ------------------------------------------------------------
-const DOT_FILL   = 0.97; //largest doct as a fraction of S
-const LEVELS     = 7; //dot sizes /brightness steps, trough -> crest
-const C2         = 0.10; //wave speed squared the 9 point stencil lowers the stability ceiling - keep this under -.33
+const DOT_FILL   = 0.92;
+const LEVELS     = 7;
+const C2         = 0.10;
 const DAMP_BASE  = 0.99995;
 const STEPS_BASE = 1;
 const IMPULSE_BASE = 3;
