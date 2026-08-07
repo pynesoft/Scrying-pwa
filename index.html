@@ -62,21 +62,21 @@ const S   = 9;  // dot spacing in css px — sets the depth plane
 const SUB = 3;   // sim cells per dot, per axis
 
 // ---- field ------------------------------------------------------------
-const DOT_FILL   = 0.92;
-const LEVELS     = 14;
-const C2         = 0.10;
+const DOT_FILL   = 0.92; // largest dot as a fraction of S
+const LEVELS     = 14; // dot sizes / brightness steps, trough -> crest
+const C2         = 0.10; // wave speed squared; the 9-point stencil lowers
 const DAMP_BASE  = 0.99995;
 const STEPS_BASE = 1;
 const IMPULSE_BASE = 3;
-const DRAG_AMP   = 0.5;
-const GAIN_MAX   = 40;
-const GAIN_EASE  = 0.03;
-const REST_EPS   = 0.0015;
-const STILL_EPS  = 0.0002;
+const DRAG_AMP   = 0.5; // strength of impulses while dragging
+const GAIN_MAX   = 40; // auto-gain ceiling, keeps a decaying field readable
+const GAIN_EASE  = 0.03; // lower = steadier levels at high gain
+const REST_EPS   = 0.0015; // below this amplitude the lattice fades to black
+const STILL_EPS  = 0.0002; // below this it stops
 
-const SUBSTEPS  = STEPS_BASE * SUB;
-const DAMP      = Math.pow(DAMP_BASE, 1 / SUB);
-const IMPULSE_R = IMPULSE_BASE * SUB;
+const SUBSTEPS  = STEPS_BASE * SUB; // simulation steps per frame
+const DAMP      = Math.pow(DAMP_BASE, 1 / SUB); // per-step energy loss
+const IMPULSE_R = IMPULSE_BASE * SUB; // radius of a tap, in lattice cells
 const INV_BLOCK = 1 / (SUB * SUB);
 
 // ---- sound ------------------------------------------------------------
@@ -87,9 +87,10 @@ const CUTOFF    = 3200;  // lowpass, tames the harshness
 const MASTER    = 0.16;  // overall level — start low, this can get shrill
 
 // ---- palette ----------------------------------------------------------
+// phosphor ramp: red and blue lag behind green, so only the crests whiten out
 const LOW  = [0, 38, 12];
 const HIGH = [150, 255, 160];
-const GLOW = true;
+const GLOW = true;  // bloom on the brightest dots only
 const GLOW_COLOR = 'rgb(80,255,110)';
 const GLOW_BLUR = 8;
 
@@ -109,6 +110,7 @@ let raf = 0;
 let running = false;
 let ringX = 0, ringY = 0;   // ring center, in sim cells
 
+// color per level; even the small dots stay visible against black
 const PHOSPHOR = [];
 for (let L = 0; L < LEVELS; L++) {
   const t = L / (LEVELS - 1), w = t * t * t;
